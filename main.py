@@ -4,9 +4,10 @@ import numpy as np
 from RL_brain import DeepQNetwork
 import os
 
-S_INFO = 6  # bit_rate, buffer_size, next_chunk_size, bandwidth_measurement(throughput and time), chunk_til_video_end
+V = 20
+S_INFO = 6 + V  # bit_rate, buffer_size, next_chunk_size, bandwidth_measurement(throughput and time), chunk_til_video_end
 S_LEN = 8  # take how many frames in the past
-A_DIM = 6
+A_DIM = 6 * V 
 
 env = gym.make('ABR-v0')
 

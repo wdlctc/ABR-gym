@@ -1,9 +1,12 @@
+import itertools
+from typing import List, Any, Dict
+
 import numpy as np
 
 MILLISECONDS_IN_SECOND = 1000.0
 B_IN_MB = 1000000.0
 BITS_IN_BYTE = 8.0
-RANDOM_SEED = 4200
+RANDOM_SEED = 42
 VIDEO_CHUNCK_LEN = 4000.0  # millisec, every time add this amount to buffer
 BITRATE_LEVELS = 6
 TOTAL_VIDEO_CHUNCK = 48
@@ -16,6 +19,14 @@ NOISE_LOW = 0.9
 NOISE_HIGH = 1.1
 VIDEO_SIZE_FILE = './video_size_'
 
+V = 20
+
+
+# LEO SETTINGS
+HANDOVER_DELAY = 0.2  # sec
+HANDOVER_WEIGHT = 0.2
+SCALE_VIDEO_SIZE_FOR_TEST = 70
+SCALE_VIDEO_LEN_FOR_TEST = 2
 
 class Environment:
     def __init__(self, all_cooked_time, all_cooked_bw, random_seed=RANDOM_SEED):
@@ -36,8 +47,13 @@ class Environment:
 
         # randomize the start point of the trace
         # note: trace file starts with time 0
-        self.mahimahi_ptr = np.random.randint(1, len(self.cooked_bw))
+        self.mahimahi_ptr = np.random.randint(1, len(self.cooked_time))
         self.last_mahimahi_time = self.cooked_time[self.mahimahi_ptr - 1]
+
+        self.sats_id = [-1 for i in range(V)]
+        self.count = 0
+        self.sats_id = self.get_available_sats_id()
+        self.cur_sat_id = self.sats_id[np.random.randint(0, self.count)]
 
         self.video_size = {}  # in bytes
         for bitrate in range(BITRATE_LEVELS):
@@ -46,7 +62,7 @@ class Environment:
                 for line in f:
                     self.video_size[bitrate].append(int(line.split()[0]))
 
-    def get_video_chunk(self, quality):
+    def get_video_chunk(self, quality, sat_id):
 
         assert quality >= 0
         assert quality < BITRATE_LEVELS
@@ -57,9 +73,32 @@ class Environment:
         delay = 0.0  # in ms
         video_chunk_counter_sent = 0  # in bytes
         
+        # print(sat_id, self.sats_id)
+        
+        target_id = self.sats_id[sat_id]
+        
+        ori_mahimahi_ptr = self.mahimahi_ptr
+        
         while True:  # download video chunk over mahimahi
-            throughput = self.cooked_bw[self.mahimahi_ptr] \
+            if target_id == -1:
+                delay += HANDOVER_DELAY
+                for i,id_ in enumerate(self.sats_id):
+                    if id_ != -1 and self.cooked_bw[id_][self.mahimahi_ptr] > 0.0:
+                        target_id = id_
+                        sat_id = i
+                        self.cur_sat_id = id_
+
+            throughput = self.cooked_bw[target_id][self.mahimahi_ptr] \
                          * B_IN_MB / BITS_IN_BYTE
+                         
+            if throughput == 0.0:
+                delay += HANDOVER_DELAY
+                for i,id_ in enumerate(self.sats_id):
+                    if id_ != -1 and self.cooked_bw[id_][self.mahimahi_ptr] > 0.0:
+                        target_id = id_
+                        sat_id = i
+                        self.cur_sat_id = id_
+            
             duration = self.cooked_time[self.mahimahi_ptr] \
                        - self.last_mahimahi_time
 	    
@@ -76,14 +115,20 @@ class Environment:
 
             video_chunk_counter_sent += packet_payload
             delay += duration
+            
             self.last_mahimahi_time = self.cooked_time[self.mahimahi_ptr]
             self.mahimahi_ptr += 1
 
-            if self.mahimahi_ptr >= len(self.cooked_bw):
+            # print(self.cur_sat_id, self.cooked_bw)
+            if self.mahimahi_ptr >= len(self.cooked_bw[self.cur_sat_id]):
                 # loop back in the beginning
                 # note: trace file starts with time 0
                 self.mahimahi_ptr = 1
                 self.last_mahimahi_time = 0
+
+            if self.sats_id[sat_id] != self.cur_sat_id:
+                delay += HANDOVER_DELAY
+                self.cur_sat_id = self.sats_id[sat_id]
 
         delay *= MILLISECONDS_IN_SECOND
         delay += LINK_RTT
@@ -114,6 +159,9 @@ class Environment:
             while True:
                 duration = self.cooked_time[self.mahimahi_ptr] \
                            - self.last_mahimahi_time
+                if sat_id != self.cur_sat_id:
+                    duration += HANDOVER_DELAY
+
                 if duration > sleep_time / MILLISECONDS_IN_SECOND:
                     self.last_mahimahi_time += sleep_time / MILLISECONDS_IN_SECOND
                     break
@@ -149,12 +197,21 @@ class Environment:
 
             # randomize the start point of the video
             # note: trace file starts with time 0
-            self.mahimahi_ptr = np.random.randint(1, len(self.cooked_bw))
+            self.mahimahi_ptr = np.random.randint(1, len(self.cooked_time))
             self.last_mahimahi_time = self.cooked_time[self.mahimahi_ptr - 1]
+
+            self.sats_id = [-1 for i in range(V)]
+            self.count = 0
+            self.get_available_sats_id()
+            self.cur_sat_id = self.sats_id[np.random.randint(0, self.count)]
 
         next_video_chunk_sizes = []
         for i in range(BITRATE_LEVELS):
             next_video_chunk_sizes.append(self.video_size[i][self.video_chunk_counter])
+
+        self.get_available_sats_id()
+        
+        satellite_bandwidth = [ 0 if sat_id == -1 else self.cooked_bw[sat_id][self.mahimahi_ptr] for sat_id in self.sats_id]
 
         return delay, \
             sleep_time, \
@@ -163,4 +220,19 @@ class Environment:
             video_chunk_size, \
             next_video_chunk_sizes, \
             end_of_video, \
-            video_chunk_remain
+            video_chunk_remain, \
+            satellite_bandwidth
+            
+    
+    def get_available_sats_id(self, mahimahi_ptr=None):
+        if mahimahi_ptr is None:
+            mahimahi_ptr = self.mahimahi_ptr
+        for sat_id, sat_bw in self.cooked_bw.items():
+            if sat_bw[mahimahi_ptr] > 0:
+                if sat_id in self.sats_id:
+                    continue
+                else:
+                    self.sats_id[self.count] = sat_id
+                    self.count = (self.count + 1) % V
+                    # print(self.count, sat_id)
+        return self.sats_id
